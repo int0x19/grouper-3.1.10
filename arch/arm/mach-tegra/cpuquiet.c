@@ -49,7 +49,7 @@ static struct work_struct minmax_work;
 static struct kobject *tegra_auto_sysfs_kobject;
 
 static bool no_lp;
-static bool enable;
+static bool enable = true;
 static unsigned long up_delay;
 static unsigned long down_delay;
 static int mp_overhead = 10;
