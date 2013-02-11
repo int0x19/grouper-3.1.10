@@ -36,9 +36,6 @@
 /* includes for the undervolt interface */
 #include "../../arch/arm/mach-tegra/dvfs.h"
 
-static DEFINE_MUTEX(dvfs_lock);
-static DEFINE_MUTEX(cpu_lp_lock);
-
 /**
  * The "cpufreq driver" - the arch- or hardware-dependent low
  * level driver of CPUFreq support, and its spinlock. This lock
@@ -618,50 +615,51 @@ static ssize_t show_UV_mV_table(struct cpufreq_policy *policy, char *buf)
 		return 0;
 	}
 	
-	for (i--; i >= 0; i--)
-		c += sprintf(c, "%u %d\n", freq_table[i], cpu_clk_g->dvfs->millivolts[i]);
+	for (i--; i >= 0; i--) {
+		if (i == 0 || i == 3 || i == 6 || i == 9 || i == 12) 
+			c += sprintf(c, "%u %d\n", freq_table[i], cpu_clk_g->dvfs->millivolts[i]);
+	}
 	
 	return c - buf;
 }
 
 static ssize_t store_UV_mV_table(struct cpufreq_policy *policy, const char *buf, size_t count)
 {
-	int i = 0;
 	int ret;
-	unsigned long cur_volt;
-	char cur_size[16];
+	int i = 0;
+	int j = 0;
+	unsigned long cur_volt[5];
 	
 	struct clk *cpu_clk_g = tegra_get_clock_by_name("cpu_g");
 	
 	i = cpu_clk_g->dvfs->num_freqs-5;
+	
+	rcu_read_lock();
 	
 	if (i == 0) {
 		pr_info("[franciscofranco] %s - error fetching the number of entries, so we break earlier.", __func__);
 		return 0;
 	}
 	
+	ret = sscanf(buf, "%lu %lu %lu %lu %lu", &cur_volt[0], &cur_volt[1], &cur_volt[2], &cur_volt[3], &cur_volt[4]);
+	if (ret != 5)
+		return -EINVAL;
+	
 	for (i--; i >= 0; i--) {
 		if (freq_table[i] != 0) {
-			ret = sscanf(buf, "%lu", &cur_volt);
-			if (ret != 1)
-				return -EINVAL;
-				
-			if (cur_volt >= 600 && cur_volt <= 1250) {
-				user_mv_table[i] = cur_volt;
-				pr_info("[franciscofranco] %s - table[%d]: %lu\n", __func__, i, cur_volt);
+			if (i == 0 || i == 3 || i == 6 || i == 9 || i == 12) {
+				user_mv_table[i] = cur_volt[j];
+				pr_info("[franciscofranco] %s - table[%d]: %lu\n", __func__, i, cur_volt[j]);
+				j++;
 			}
-			
-			ret = sscanf(buf, "%s", cur_size);
-			
-			if (ret == 0)
-				return 0;
-				
-			buf += (strlen(cur_size) + 1);
 		}
 	}
 	
 	/* lets update the table now */
 	cpu_clk_g->dvfs->millivolts = user_mv_table;
+	j = 0;
+	
+	rcu_read_unlock();
 	
 	return count;
 }
@@ -689,7 +687,7 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 	unsigned int i = 0;
 	unsigned long new_gpu_freq = 0;
 	unsigned int new_volt = 0;
-
+	
 	//all the tables that need to be updated with the new frequencies
 	struct clk *vde = tegra_get_clock_by_name("vde");
 	struct clk *mpe = tegra_get_clock_by_name("mpe");
@@ -705,6 +703,8 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 	unsigned int array_size = vde->dvfs->num_freqs;
 	char cur_size[array_size];
 	i = array_size;
+	
+	rcu_read_lock();
 
 	if (i == 0) 
 		return -EINVAL;
@@ -729,7 +729,6 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 	pr_info("NEW PLL_C MAX_RATE: %lu\n", pll_c->max_rate);
 
 	for (i--; i >= 5; i--) {
-		mutex_lock(&dvfs_lock);
 		if (gpu_freq < 600) {
 			new_volt = 1250;
 			vde->dvfs->millivolts[i] = new_volt;
@@ -756,7 +755,6 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 		cbus->dvfs->freqs[i] = new_gpu_freq;
 		pll_c->dvfs->freqs[i] = (new_gpu_freq*2);
 		pr_info("NEW PLL_C FREQS: %lu\n", pll_c->dvfs->freqs[i]);
-		mutex_unlock(&dvfs_lock);
 	}
 
 	ret = sscanf(buf, "%s", cur_size);
@@ -765,41 +763,9 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 		return -EINVAL;
 
 	buf += (strlen(cur_size) + 1);
+	
+	rcu_read_unlock();
 
-	return count;
-}
-
-static ssize_t show_cpu_lp_max(struct cpufreq_policy *policy, char *buf)
-{
-	char *c = buf;
-	struct clk *cpu_lp = tegra_get_clock_by_name("cpu_lp");
-	 
-	return sprintf(c, "%lu ", cpu_lp->max_rate/1000000);
-}
-
-static ssize_t store_cpu_lp_max(struct cpufreq_policy *policy, const char *buf, size_t count)
-{
-	int ret;
-	unsigned long max_rate, old_rate;
-	char cur_size[1];
-	
-	struct clk *cpu_lp = tegra_get_clock_by_name("cpu_lp");
-	
-	ret = sscanf(buf, "%lu", &max_rate);
-	old_rate = cpu_lp->max_rate;
-	
-	mutex_lock(&cpu_lp_lock);
-	cpu_lp->max_rate = max_rate*1000000;
-	pr_info("NEW CPU_LP MAX_RATE ALLOWED: OLD:%lu - NEW: %lu\n", old_rate, cpu_lp->max_rate);
-	mutex_unlock(&cpu_lp_lock);
-			
-	ret = sscanf(buf, "%s", cur_size);
-			
-	if (ret == 0)
-		return -EINVAL;
-				
-	buf += (strlen(cur_size) + 1);
-	
 	return count;
 }
 
@@ -822,7 +788,6 @@ cpufreq_freq_attr_ro(policy_min_freq);
 cpufreq_freq_attr_ro(policy_max_freq);
 cpufreq_freq_attr_rw(UV_mV_table);
 cpufreq_freq_attr_rw(gpu_oc);
-cpufreq_freq_attr_rw(cpu_lp_max);
 
 static struct attribute *default_attrs[] = {
 	&cpuinfo_min_freq.attr,
@@ -841,7 +806,6 @@ static struct attribute *default_attrs[] = {
 	&policy_max_freq.attr,
 	&UV_mV_table.attr,
 	&gpu_oc.attr,
-	&cpu_lp_max.attr,
 	NULL
 };
 
